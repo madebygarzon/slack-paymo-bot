@@ -1,36 +1,48 @@
-import { App, ExpressReceiver } from "@slack/bolt";
+import { App, SocketModeReceiver } from "@slack/bolt";
 import axios from "axios";
 
-// 1) Mapeo estático Slack→Paymo (reemplaza IDs de ejemplo con los de tu equipo)
+// 1) Validación de env vars
+const appToken = process.env.SLACK_APP_TOKEN;
+if (!appToken) throw new Error("Falta SLACK_APP_TOKEN");
+
+const botToken = process.env.SLACK_BOT_TOKEN;
+if (!botToken) throw new Error("Falta SLACK_BOT_TOKEN");
+
+const signingSecret = process.env.SLACK_SIGNING_SECRET;
+if (!signingSecret) throw new Error("Falta SLACK_SIGNING_SECRET");
+
+const paymoKey = process.env.PAYMO_API_KEY;
+if (!paymoKey) throw new Error("Falta PAYMO_API_KEY");
+
+// 2) Mapeo estático Slack→Paymo
 const slackIdToPaymo: Record<string, string> = {
   "U1234ABCD": "987654",
   "U5678EFGH": "123456",
-  // …añade aquí cada Slack ID con su user_id de Paymo…
 };
 
 function mapUser(slackId: string): string {
   const paymoId = slackIdToPaymo[slackId];
-  if (!paymoId) throw new Error(`No hay mapeo para Slack ID ${slackId}`);
+  if (!paymoId) throw new Error(`No mapeo para Slack ID ${slackId}`);
   return paymoId;
 }
 
-// 2) Inicializa el receiver de Express para Vercel
-const receiver = new ExpressReceiver({
-  signingSecret: process.env.SLACK_SIGNING_SECRET!,
-});
+// 3) Crea el receptor en Socket Mode
+const receiver = new SocketModeReceiver({ appToken });
 
+// 4) Inicializa la App pasando el signingSecret aquí
 const app = new App({
-  token: process.env.SLACK_BOT_TOKEN,
+  token: botToken,
+  signingSecret,
   receiver,
 });
 
-// 3) Cliente Paymo
+// 5) Cliente de Paymo
 const paymo = axios.create({
   baseURL: "https://app.paymoapp.com/api",
-  auth: { username: process.env.PAYMO_API_KEY!, password: "x" },
+  auth: { username: paymoKey, password: "x" },
 });
 
-// 4) Comando /track
+// 6) Comando /track
 app.command("/track", async ({ command, ack, respond }) => {
   await ack();
 
@@ -42,41 +54,34 @@ app.command("/track", async ({ command, ack, respond }) => {
   }
 
   const [action, taskId] = command.text.split(/\s+/);
-
-  if (action === "start") {
-    try {
+  try {
+    if (action === "start") {
       const { data } = await paymo.post("/timeentries", {
         task_id: taskId,
         user_id: paymoUserId,
         start_time: new Date().toISOString(),
         duration: 0,
       });
-      await respond(`▶️ Cronómetro iniciado (entry id: ${data.id}).`);
-    } catch (err: any) {
-      await respond(`❌ Error al iniciar: ${err.message}`);
+      return respond(`▶️ Cronómetro iniciado (id: ${data.id}).`);
     }
-  } else if (action === "stop") {
-    try {
-      const entryId = await findRunning(paymoUserId);
-      await paymo.put(`/timeentries/${entryId}`, {
+    if (action === "stop") {
+      const { data } = await paymo.get("/timeentries", {
+        params: { where: `user_id=${paymoUserId};duration=0` },
+      });
+      if (!data.length) throw new Error("No hay time entry en curso.");
+      await paymo.put(`/timeentries/${data[0].id}`, {
         end_time: new Date().toISOString(),
       });
-      await respond("⏹️ Cronómetro parado y registrado.");
-    } catch (err: any) {
-      await respond(`❌ Error al parar: ${err.message}`);
+      return respond("⏹️ Cronómetro parado y registrado.");
     }
-  } else {
-    await respond("Uso: `/track start <taskId>` o `/track stop`.");
+    return respond("Uso: `/track start <taskId>` o `/track stop`.");
+  } catch (err: any) {
+    return respond(`❌ Error: ${err.message}`);
   }
 });
 
-async function findRunning(paymoUserId: string): Promise<string> {
-  const { data } = await paymo.get("/timeentries", {
-    params: { where: `user_id=${paymoUserId};duration=0` },
-  });
-  if (!data.length) throw new Error("No hay ningún time entry en curso.");
-  return data[0].id;
-}
-
-// 5) Exporta la app de Express para Vercel
-export default receiver.app;
+// 7) Arranca Socket Mode
+(async () => {
+  await receiver.start();
+  console.log("⚡️ Socket Mode activo");
+})();
