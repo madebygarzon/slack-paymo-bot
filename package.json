@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "dev": "vercel dev --listen 3000",
+    "vercel-dev": "vercel dev --listen 3000",
     "start": "node src/api/index.ts"
   },
   "keywords": [],
